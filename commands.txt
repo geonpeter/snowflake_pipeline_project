@@ -1,0 +1,162 @@
+-- Drop database
+DROP DATABASE customers_db;
+
+-- Create database
+CREATE OR REPLACE DATABASE customers_db;
+
+-- Create schema
+CREATE SCHEMA customers_sch;
+
+-- Set default database
+USE customers_db;
+
+-- Set default schema
+USE SCHEMA customers_sch;
+
+-- Create table 
+CREATE OR REPLACE TABLE customers_data (
+	customer_pk number(38,0),
+	salutation varchar(10),
+	first_name varchar(20),
+	last_name varchar(30),
+	gender varchar(1),
+	marital_status varchar(1),
+	day_of_birth date,
+	birth_country varchar(60),
+	email_address varchar(50),
+	city_name varchar(60),
+	zip_code varchar(10),
+	country_name varchar(20),
+	gmt_timezone_offset number(10,2),
+	preferred_cust_flag boolean,
+	registration_time timestamp_ltz(9)
+);
+
+-- Create a Cloud Storage Integration in Snowflake
+CREATE OR REPLACE STORAGE INTEGRATION integration_gcp_customers
+    TYPE = EXTERNAL_STAGE
+    STORAGE_PROVIDER = GCS
+    ENABLED = TRUE
+    STORAGE_ALLOWED_LOCATIONS = ('gcs://bucketforcustomers/');
+
+-- Describe the integration to get service account details
+DESC INTEGRATION integration_gcp_customers;
+
+--principal value : kiaf00000@gcpeuropewest3-1-d3ca.iam.gserviceaccount.com
+--kiaf00000@gcpeuropewest3-1-d3ca.iam.gserviceaccount.com
+
+-- Create a stage in Snowflake pointing to the GCS bucket
+CREATE OR REPLACE STAGE snowflake_stage_customers
+    URL = 'gcs://bucketforcustomers/'
+    STORAGE_INTEGRATION = integration_gcp_customers;
+
+-- Show available stages
+SHOW STAGES;
+
+-- List the files in the stage
+LIST @snowflake_stage_customers;
+
+-- Create a notification integration to connect with Pub/Sub
+CREATE OR REPLACE NOTIFICATION INTEGRATION notification_pubsub
+    TYPE = QUEUE
+    NOTIFICATION_PROVIDER = GCP_PUBSUB
+    ENABLED = TRUE
+    GCP_PUBSUB_SUBSCRIPTION_NAME = 'projects/projectbigdatageon/subscriptions/topic_customers-sub';
+
+
+-- Describe the notification integration
+DESC INTEGRATION notification_pubsub;
+
+-- Principal Value : kjaf00000@gcpeuropewest3-1-d3ca.iam.gserviceaccount.com
+
+-- Create a Snowpipe to ingest data into the customers table
+CREATE OR REPLACE PIPE snowflake_pipe
+    AUTO_INGEST = TRUE
+    INTEGRATION = notification_pubsub
+    AS
+    COPY INTO customers_data
+    FROM @snowflake_stage_customers
+    FILE_FORMAT = (TYPE='CSV')
+    ON_ERROR = 'SKIP_FILE';;
+
+
+-- Show all pipes
+SHOW PIPES;
+
+
+-- Check the status of the pipe
+SELECT SYSTEM$PIPE_STATUS('snowflake_pipe');
+
+
+-- Check ingestion history
+SELECT * 
+FROM TABLE(INFORMATION_SCHEMA.COPY_HISTORY(TABLE_NAME => 'customers_data', START_TIME => DATEADD(hours, -1, CURRENT_TIMESTAMP())));
+
+
+-- Query Snowflake Table
+SELECT * FROM customers_data;
+
+
+
+--Stop Pipeline
+ALTER PIPE snowflake_pipe SET PIPE_EXECUTION_PAUSED = TRUE;
+
+--Restart Pipeline
+ALTER PIPE snowflake_pipe SET PIPE_EXECUTION_PAUSED = FALSE;
+
+
+-- Create table customers_data_UK 
+CREATE OR REPLACE TABLE customers_data_UK (
+	customer_pk number(38,0),
+	salutation varchar(10),
+	first_name varchar(20),
+	last_name varchar(30),
+	gender varchar(1),
+	marital_status varchar(1),
+	day_of_birth date,
+	birth_country varchar(60),
+	email_address varchar(50),
+	city_name varchar(60),
+	zip_code varchar(10),
+	country_name varchar(20),
+	gmt_timezone_offset number(10,2),
+	preferred_cust_flag boolean,
+	registration_time timestamp_ltz(9)
+);
+
+SELECT * FROM customers_data_uk;
+
+-- Schedule task to ingest data into customers_data_UK from customer_data source table
+CREATE OR REPLACE TASK target_table_ingestion
+WAREHOUSE = COMPUTE_WH
+SCHEDULE = 'USING CRON */2 * * * * UTC' -- Every 2 minutes
+COMMENT = 'This task runs in every 2 minutes'
+AS
+INSERT INTO customers_data_uk SELECT * FROM customers_data WHERE country_name = 'UK';
+
+-- The task is already in suspended mode inorder to resume
+ALTER TASK target_table_ingestion RESUME;
+
+
+-- Check History Table
+SELECT * FROM TABLE (INFORMATION_SCHEMA.TASK_HISTORY(TASK_NAME => 'target_table_ingestion')) ORDER BY SCHEDULED_TIME;
+
+
+-- Query the customers_data_UK
+SELECT * FROM customers_data_uk;
+
+-- Suspend the task
+ALTER TASK target_table_ingestion SUSPEND;
+
+-- Schedule Next task
+CREATE OR REPLACE TASK next_task
+WAREHOUSE = COMPUTE_WH
+ALTER target_table_ingestion
+AS
+DELETE FROM customers_data_uk WHERE REGISTRATION_TIME < CURRENT_DATE();
+
+-- Drop the task
+DROP TASK target_table_ingestion;
+
+
+
